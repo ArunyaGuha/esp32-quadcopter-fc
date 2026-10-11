@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Quad Control</title>
+<style>
+  :root{--bg:#0e1116;--panel:#171c24;--line:#2a3240;--text:#e6eaf0;--muted:#8a94a6;--accent:#3ea6ff;--ok:#33d17a;--bad:#ff5d5d}
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font:15px system-ui,sans-serif;overflow:hidden;touch-action:none;user-select:none}
+  .app{display:grid;grid-template-rows:auto 1fr;height:100%;padding:12px 16px;gap:12px}
+  header{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+  h1{font-size:16px;margin:0;font-weight:600;flex:1;min-width:120px}
+  .dot{width:10px;height:10px;border-radius:50%;background:var(--bad);display:inline-block;margin-right:6px}
+  .dot.on{background:var(--ok)}
+  button{font:inherit;color:var(--text);background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 16px;cursor:pointer}
+  button:active{transform:scale(.97)}
+  #armBtn.armed{background:var(--bad);border-color:var(--bad);color:#fff}
+  #stopBtn{border-color:var(--bad);color:var(--bad)}
+  main{display:grid;grid-template-columns:1fr minmax(150px,200px) 1fr;gap:12px;min-height:0}
+  .zone{position:relative;background:var(--panel);border:1px solid var(--line);border-radius:16px;min-height:0}
+  .zone::before,.zone::after{content:"";position:absolute;background:var(--line)}
+  .zone::before{left:50%;top:10%;bottom:10%;width:1px}
+  .zone::after{top:50%;left:10%;right:10%;height:1px}
+  .knob{position:absolute;width:64px;height:64px;margin:-32px 0 0 -32px;border-radius:50%;background:var(--accent);opacity:.9;pointer-events:none;box-shadow:0 0 0 6px rgba(62,166,255,.18)}
+  .label{position:absolute;left:12px;top:8px;color:var(--muted);font-size:12px}
+  .mid{display:flex;flex-direction:column;gap:8px;justify-content:center}
+  .cell{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:8px 12px}
+  .cell small{display:block;color:var(--muted);font-size:11px}
+  .cell b{font:600 20px ui-monospace,monospace}
+  #msg{color:var(--muted);font-size:12px;width:100%}
+  @media (max-width:640px){main{grid-template-columns:1fr 1fr}.mid{grid-column:1/-1;order:-1;flex-direction:row;flex-wrap:wrap}.cell{flex:1}}
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1><span id="connDot" class="dot"></span><span id="connLabel">Disconnected</span></h1>
+    <button id="connBtn">Connect</button>
+    <button id="armBtn" disabled>ARM</button>
+    <button id="stopBtn" disabled>STOP</button>
+    <div id="msg">Needs Chrome or Edge (desktop or Android) over https or localhost. Keep props off for first tests.</div>
+  </header>
+  <main>
+    <div class="zone" id="leftZone"><span class="label">Throttle (up/down, holds) · Yaw (left/right)</span><div class="knob" id="leftKnob"></div></div>
+    <div class="mid">
+      <div class="cell"><small>Throttle</small><b id="tThr">0</b></div>
+      <div class="cell"><small>Pitch</small><b id="tPitch">0</b></div>
+      <div class="cell"><small>Roll</small><b id="tRoll">0</b></div>
+      <div class="cell"><small>Yaw</small><b id="tYaw">0</b></div>
+      <div class="cell"><small>Armed</small><b id="tArm">NO</b></div>
+    </div>
+    <div class="zone" id="rightZone"><span class="label">Pitch (up/down) · Roll (left/right)</span><div class="knob" id="rightKnob"></div></div>
+  </main>
+</div>
+<script>
+const DEVICE_PREFIX = "ESP32-Quad";
+const SERVICE_UUID  = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
+const CHAR_UUID     = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
+const SEND_MS = 20, MAX_THR = 1000, MAX_STICK = 500;
+
+const st = {arm:0, thr:0, pitch:0, roll:0, yaw:0};
+let ch = null, dev = null, busy = false, timer = null;
+const $ = id => document.getElementById(id);
+
+function setConn(on, text){
+  $("connDot").classList.toggle("on", on);
+  $("connLabel").textContent = text || (on ? "Connected" : "Disconnected");
+  $("armBtn").disabled = $("stopBtn").disabled = !on;
+  $("connBtn").textContent = on ? "Disconnect" : "Connect";
+}
+function render(){
+  $("tThr").textContent = st.thr; $("tPitch").textContent = st.pitch;
+  $("tRoll").textContent = st.roll; $("tYaw").textContent = st.yaw;
+  $("tArm").textContent = st.arm ? "YES" : "NO";
+  $("armBtn").textContent = st.arm ? "DISARM" : "ARM";
+  $("armBtn").classList.toggle("armed", !!st.arm);
+}
+
+// ---- sticks ----
+// kind "left": vertical = throttle (stays where you leave it), horizontal = yaw (springs to 0)
+// kind "right": pitch/roll, both spring to 0
+function makeStick(zoneId, knobId, kind){
+  const z = $(zoneId), k = $(knobId);
+  let active = null, thrFrac = 0; // thrFrac 0..1 (left stick vertical)
+  function place(nx, ny){ // nx,ny in -1..1 (ny up = +)
+    const r = z.getBoundingClientRect();
+    k.style.left = ((nx+1)/2*r.width) + "px";
+    k.style.top  = ((1-ny)/2*r.height) + "px";
+  }
+  function home(){
+    if(kind === "left") place(0, thrFrac*2-1); else place(0,0);
+  }
+  function update(e){
+    const r = z.getBoundingClientRect();
+    let nx = ((e.clientX-r.left)/r.width)*2-1;
+    let ny = 1-((e.clientY-r.top)/r.height)*2;
+    nx = Math.max(-1,Math.min(1,nx)); ny = Math.max(-1,Math.min(1,ny));
+    place(nx, ny);
+    if(kind === "left"){
+      thrFrac = (ny+1)/2;
+      st.thr = st.arm ? Math.round(thrFrac*MAX_THR) : 0;
+      st.yaw = Math.round(nx*MAX_STICK);
+    } else {
+      st.pitch = Math.round(ny*MAX_STICK);
+      st.roll  = Math.round(nx*MAX_STICK);
+    }
+    render();
+  }
+  z.addEventListener("pointerdown", e=>{active=e.pointerId; z.setPointerCapture(active); update(e);});
+  z.addEventListener("pointermove", e=>{if(e.pointerId===active) update(e);});
+  const end = e=>{
+    if(e.pointerId!==active) return; active=null;
+    if(kind==="left") st.yaw=0; else {st.pitch=0; st.roll=0;}
+    home(); render();
+  };
+  z.addEventListener("pointerup", end); z.addEventListener("pointercancel", end);
+  window.addEventListener("resize", home);
+  return {home, reset(){thrFrac=0; home();}, thrFrac:()=>thrFrac};
+}
+const left = makeStick("leftZone","leftKnob","left");
+const right = makeStick("rightZone","rightKnob","right");
+left.home(); right.home();
+
+// ---- commands ----
+function disarm(){
+  st.arm = 0; st.thr = 0; st.pitch = st.roll = st.yaw = 0;
+  left.reset(); right.home(); render();
+}
+$("armBtn").onclick = ()=>{
+  if(st.arm) disarm(); else { st.arm = 1; left.reset(); st.thr = 0; render(); }
+};
+$("stopBtn").onclick = disarm;
+
+function packet(){
+  const b = new ArrayBuffer(9), v = new DataView(b);
+  v.setUint8(0, st.arm);
+  v.setInt16(1, st.thr, true);
+  v.setInt16(3, st.pitch, true);
+  v.setInt16(5, st.roll, true);
+  v.setInt16(7, st.yaw, true);
+  return b;
+}
+async function send(){
+  if(!ch || busy) return;
+  busy = true;
+  try { await ch.writeValueWithoutResponse(packet()); }
+  catch(e){ /* dropped packet; next tick retries */ }
+  busy = false;
+}
+
+// ---- bluetooth ----
+async function connect(){
+  if(!navigator.bluetooth){ $("msg").textContent = "Web Bluetooth not supported here. Use Chrome/Edge on desktop or Android (not iOS)."; return; }
+  try{
+    dev = await navigator.bluetooth.requestDevice({
+      filters:[{namePrefix:DEVICE_PREFIX}], optionalServices:[SERVICE_UUID]});
+    dev.addEventListener("gattserverdisconnected", onLost);
+    $("connLabel").textContent = "Connecting...";
+    const server = await dev.gatt.connect();
+    const svc = await server.getPrimaryService(SERVICE_UUID);
+    ch = await svc.getCharacteristic(CHAR_UUID);
+    disarm(); setConn(true);
+    $("msg").textContent = "Connected. Press ARM, then raise the left stick slowly.";
+    timer = setInterval(send, SEND_MS);
+  }catch(e){
+    setConn(false); $("msg").textContent = "Connect failed: " + e.message;
+  }
+}
+function onLost(){
+  clearInterval(timer); ch = null; disarm(); setConn(false);
+  $("msg").textContent = "Disconnected. The drone failsafe has disarmed it.";
+}
+$("connBtn").onclick = async ()=>{
+  if(dev && dev.gatt.connected){
+    try{ disarm(); await ch.writeValueWithoutResponse(packet()); }catch(e){}
+    dev.gatt.disconnect();
+  } else connect();
+};
+
+// safety: leaving the tab/app disarms
+document.addEventListener("visibilitychange", ()=>{
+  if(document.hidden && ch){ disarm(); send(); }
+});
+render();
+</script>
+</body>
+</html>

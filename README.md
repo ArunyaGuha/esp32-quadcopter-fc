@@ -36,7 +36,15 @@ Motor pins (top view, make sure each physical motor sits in the matching corner)
 3. Keep the drone still and flat for the first few seconds after power-on while it calibrates.
 4. On the laptop: `pip install bleak keyboard`, then `python controller/ble_controller.py` (Windows: run as Administrator for the `keyboard` library).
 
-## Controls
+## Dashboard (phone or laptop)
+
+`dashboard/index.html` is a touch dashboard that talks to the drone over Web Bluetooth with the same packet as the Python script. Left stick: throttle (up/down, holds its position) and yaw. Right stick: pitch and roll. ARM and STOP buttons, live values, and it disarms if the tab is hidden or the link drops.
+
+- Works in Chrome or Edge on desktop and Android. iOS Safari does not support Web Bluetooth.
+- Web Bluetooth needs a secure page. Either serve it locally (`cd dashboard && python -m http.server 8000`, then open `http://localhost:8000`), or enable GitHub Pages for this repo (Settings > Pages > Deploy from branch > `main` / `/dashboard` is not selectable, so choose `/ (root)` and open `/dashboard/`).
+- Close the Python controller first; the ESP32 accepts one BLE connection at a time.
+
+## Controls (Python keyboard script)
 
 | Key | Action |
 |---|---|
